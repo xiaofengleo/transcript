@@ -2,26 +2,47 @@ from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-from youtube_transcript_api.formatters import TextFormatter
-import openai
+import httpx
 import os
 from dotenv import load_dotenv
 import re
 import logging
-from typing import Optional
 import traceback
 from fastapi.middleware.cors import CORSMiddleware
+import base64
+import xml.etree.ElementTree as ET
+import json
+from typing import Optional, Union, Dict, Any
+from pydantic import BaseModel
+from bs4 import BeautifulSoup
+import html
+from urllib.parse import parse_qs, urlparse
+import subprocess
+import sys
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
+# Set up detailed logging
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Get YouTube API key
+YOUTUBE_API_KEY = os.getenv('YOUTUBE_API_KEY')
+if not YOUTUBE_API_KEY:
+    logger.error("YouTube API key not found in environment variables!")
+
+# Check if youtube_transcript_api is installed, if not install it
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    logger.info("YouTubeTranscriptApi already installed")
+except ImportError:
+    logger.info("Installing YouTubeTranscriptApi...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "youtube-transcript-api"])
+    from youtube_transcript_api import YouTubeTranscriptApi
 
 # Initialize FastAPI app
 app = FastAPI(title="YouTube Transcript Processor")
@@ -35,79 +56,156 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files
+# Mount static files and setup templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Setup templates
 templates = Jinja2Templates(directory="templates")
 
-# Configure OpenAI
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    logger.error("OpenAI API key not found in environment variables!")
-else:
-    openai.api_key = api_key
-    logger.info("OpenAI API key loaded")
+class VideoURL(BaseModel):
+    video_url: str
 
 def extract_video_id(url: str) -> str:
-    """Extract YouTube video ID from URL."""
+    """Extract video ID from YouTube URL."""
     logger.info(f"Extracting video ID from URL: {url}")
     
+    # Multiple patterns to match different YouTube URL formats
     patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})',
-        r'(?:embed\/)([0-9A-Za-z_-]{11})'
+        r'youtube\.com\/watch\?v=([-\w]+)',           # Standard watch URL
+        r'youtu\.be\/([-\w]+)',                       # Shortened URL
+        r'youtube\.com\/embed\/([-\w]+)',             # Embed URL
+        r'v=([-\w]+)(?:&|$)'                          # v= parameter
     ]
     
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             video_id = match.group(1)
-            logger.info(f"Successfully extracted video ID: {video_id}")
+            logger.info(f"Extracted video ID: {video_id}")
             return video_id
             
-    raise ValueError(f"Could not extract video ID from URL: {url}")
+    logger.error(f"Could not extract video ID from URL: {url}")
+    raise ValueError(f"Invalid YouTube URL: {url}")
 
-def get_transcript(video_id: str) -> str:
-    """Get transcript for a YouTube video."""
+async def extract_captions_from_html(video_id: str) -> Optional[Dict[str, Any]]:
+    """Extract captions directly from YouTube page HTML."""
     try:
-        logger.info(f"Fetching transcript for video ID: {video_id}")
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
         
-        # Format transcript with timestamps
-        formatted_transcript = []
-        for entry in transcript_list:
-            timestamp = int(float(entry['start']))
-            minutes = timestamp // 60
-            seconds = timestamp % 60
-            time_str = f"{minutes:02d}:{seconds:02d}"
-            formatted_transcript.append(f"[{time_str}] {entry['text']}")
-        
-        return "\n".join(formatted_transcript)
-        
-    except TranscriptsDisabled:
-        logger.error(f"Transcripts are disabled for video {video_id}")
-        raise HTTPException(status_code=400, detail="Transcripts are disabled for this video")
-    except NoTranscriptFound:
-        logger.error(f"No transcript found for video {video_id}")
-        raise HTTPException(status_code=400, detail="No transcript found for this video")
+        logger.info(f"Fetching YouTube page: {url}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch YouTube page, status code: {response.status_code}")
+                return None
+                
+            html_content = response.text
+            logger.info(f"Successfully fetched YouTube page ({len(html_content)} bytes)")
+            
+            # Look for caption data in the HTML
+            # Pattern to find ytInitialPlayerResponse
+            pattern = r'ytInitialPlayerResponse\s*=\s*({.+?});'
+            match = re.search(pattern, html_content)
+            
+            if not match:
+                logger.error("Could not find ytInitialPlayerResponse in the HTML")
+                return None
+                
+            player_response_str = match.group(1)
+            
+            try:
+                player_response = json.loads(player_response_str)
+                logger.info("Successfully parsed player response JSON")
+                
+                # Extract captions data
+                if 'captions' in player_response:
+                    captions_data = player_response['captions']
+                    logger.info(f"Found captions data: {json.dumps(captions_data)[:200]}...")
+                    
+                    if 'playerCaptionsTracklistRenderer' in captions_data:
+                        tracks = captions_data['playerCaptionsTracklistRenderer'].get('captionTracks', [])
+                        logger.info(f"Found {len(tracks)} caption tracks")
+                        
+                        if tracks:
+                            # Find Dutch caption track
+                            dutch_track = None
+                            for track in tracks:
+                                lang = track.get('languageCode', '')
+                                logger.info(f"Found track with language: {lang}")
+                                if lang == 'nl' or lang.startswith('nl-'):
+                                    dutch_track = track
+                                    logger.info(f"Selected Dutch track: {json.dumps(dutch_track)[:200]}...")
+                                    break
+                            
+                            if not dutch_track:
+                                # If no Dutch track, take the first one
+                                dutch_track = tracks[0]
+                                logger.info(f"No Dutch track found, using first track: {json.dumps(dutch_track)[:200]}...")
+                            
+                            # Get the caption content URL
+                            base_url = dutch_track.get('baseUrl')
+                            if base_url:
+                                logger.info(f"Found caption URL: {base_url}")
+                                
+                                # Fetch the actual captions
+                                async with httpx.AsyncClient() as client:
+                                    caption_response = await client.get(base_url)
+                                    logger.info(f"Caption response status: {caption_response.status_code}")
+                                    
+                                    if caption_response.status_code == 200:
+                                        caption_content = caption_response.text
+                                        logger.info(f"Caption content preview: {caption_content[:200]}...")
+                                        
+                                        # Parse the XML content
+                                        try:
+                                            root = ET.fromstring(caption_content)
+                                            events = []
+                                            
+                                            for text in root.findall('.//text'):
+                                                start = float(text.get('start', 0))
+                                                dur = float(text.get('dur', 0))
+                                                content = text.text or ""
+                                                
+                                                if content:
+                                                    content = (content.replace('&#39;', "'")
+                                                                    .replace('&quot;', '"')
+                                                                    .replace('\n', ' ')
+                                                                    .replace('&amp;', '&')
+                                                                    .strip())
+                                                    
+                                                    events.append({
+                                                        "tStartMs": int(start * 1000),
+                                                        "dDurationMs": int(dur * 1000),
+                                                        "segs": [{"utf8": content}]
+                                                    })
+                                            
+                                            if events:
+                                                logger.info(f"Successfully parsed {len(events)} caption events")
+                                                return {"events": events}
+                                            else:
+                                                logger.warning("No caption events found in XML")
+                                        except ET.ParseError as e:
+                                            logger.error(f"Failed to parse caption XML: {str(e)}")
+                                    else:
+                                        logger.error(f"Failed to fetch captions from URL: {base_url}")
+                            else:
+                                logger.error("No baseUrl found in caption track")
+                        else:
+                            logger.error("No caption tracks found")
+                    else:
+                        logger.error("No playerCaptionsTracklistRenderer found")
+                else:
+                    logger.error("No captions data found in player response")
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse player response JSON: {str(e)}")
+                
+        return None
     except Exception as e:
-        logger.error(f"Error getting transcript: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get transcript: {str(e)}")
-
-async def improve_transcript(transcript: str) -> str:
-    """Improve transcript using ChatGPT."""
-    try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a professional editor. Your task is to improve the syntax and punctuation of transcripts while maintaining their original meaning."},
-                {"role": "user", "content": f"Please improve the syntax and punctuation of this transcript:\n\n{transcript}"}
-            ]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error extracting captions from HTML: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
@@ -115,121 +213,40 @@ async def home(request: Request):
 
 @app.post("/process")
 async def process_video(video_url: str = Form(...)):
+    """Process video URL and return captions."""
     try:
         logger.info(f"Processing video URL: {video_url}")
         
-        # Extract video ID
         video_id = extract_video_id(video_url)
+        logger.info(f"Extracted video ID: {video_id}")
         
-        # Get transcript
-        transcript = get_transcript(video_id)
+        # Extract captions directly from the YouTube page
+        captions = await extract_captions_from_html(video_id)
         
-        return {
-            "original": transcript,
-            "improved": transcript  # For now, returning same text
-        }
+        if captions and captions.get("events"):
+            logger.info(f"Successfully extracted captions with {len(captions['events'])} events")
+            return captions
+        else:
+            logger.error("Failed to extract captions")
+            return JSONResponse(
+                status_code=404,
+                content={"detail": "No captions found for this video"}
+            )
         
-    except ValueError as ve:
-        logger.error(f"Invalid URL format: {str(ve)}")
-        raise HTTPException(status_code=400, detail=str(ve))
-    except HTTPException as he:
-        raise he
+    except ValueError as e:
+        logger.error(f"Value error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(e)}
+        )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/improve")
-async def improve_transcript_endpoint(video_url: str = Form(...)):
-    logger.info(f"Received request to improve transcript for video: {video_url}")
-    
-    try:
-        # Check OpenAI API key first
-        if not api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="OpenAI API key not configured. Check server configuration."
-            )
-
-        # Extract video ID
-        try:
-            video_id = video_url.split('v=')[1].split('&')[0]
-            logger.info(f"Extracted video ID: {video_id}")
-        except Exception as e:
-            logger.error(f"Failed to extract video ID: {str(e)}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid YouTube URL format. Please use a URL like 'https://www.youtube.com/watch?v=VIDEO_ID'"
-            )
-
-        # Get transcript
-        try:
-            logger.info(f"Attempting to get transcript for video {video_id}")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            formatter = TextFormatter()
-            transcript = formatter.format_transcript(transcript_list)
-            logger.info("Successfully retrieved transcript")
-            
-            if not transcript:
-                raise ValueError("Empty transcript received")
-                
-        except TranscriptsDisabled:
-            raise HTTPException(
-                status_code=400,
-                detail="Transcripts are disabled for this video"
-            )
-        except NoTranscriptFound:
-            raise HTTPException(
-                status_code=400,
-                detail="No transcript found for this video"
-            )
-        except Exception as e:
-            logger.error(f"Transcript error: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(
-                status_code=400,
-                detail=f"Failed to get transcript: {str(e)}"
-            )
-
-        # Improve transcript with OpenAI
-        try:
-            logger.info("Attempting to improve transcript with OpenAI")
-            response = await openai.ChatCompletion.acreate(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a professional editor. Improve the syntax and punctuation while maintaining the meaning."},
-                    {"role": "user", "content": f"Improve this transcript:\n\n{transcript}"}
-                ]
-            )
-            improved_transcript = response.choices[0].message.content
-            logger.info("Successfully improved transcript")
-            
-        except Exception as e:
-            logger.error(f"OpenAI API error: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to improve transcript: {str(e)}"
-            )
-
-        return JSONResponse(
-            content={
-                "original": transcript,
-                "improved": improved_transcript
-            },
-            status_code=200
-        )
-
-    except HTTPException as he:
-        logger.error(f"HTTP Exception: {he.detail}")
-        return JSONResponse(
-            content={"detail": he.detail},
-            status_code=he.status_code
-        )
-    except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        logger.error(error_msg)
         logger.error(traceback.format_exc())
         return JSONResponse(
-            content={"detail": error_msg},
-            status_code=500
-        ) 
+            status_code=500,
+            content={"detail": str(e)}
+        )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 
