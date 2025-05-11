@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi import FastAPI, HTTPException, Request, Form, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import base64
 import xml.etree.ElementTree as ET
 import json
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, List
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 import html
@@ -44,6 +44,9 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "youtube-transcript-api"])
     from youtube_transcript_api import YouTubeTranscriptApi
 
+# Add OpenAI integration
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 # Initialize FastAPI app
 app = FastAPI(title="YouTube Transcript Processor")
 
@@ -62,6 +65,15 @@ templates = Jinja2Templates(directory="templates")
 
 class VideoURL(BaseModel):
     video_url: str
+
+class TranscriptSegment(BaseModel):
+    start_time: int  # milliseconds
+    duration: int    # milliseconds
+    text: str
+
+class TranscriptEnhanceRequest(BaseModel):
+    segments: List[TranscriptSegment]
+    language: str = "dutch"  # default to Dutch since your video has Dutch captions
 
 def extract_video_id(url: str) -> str:
     """Extract video ID from YouTube URL."""
@@ -241,6 +253,218 @@ async def process_video(video_url: str = Form(...)):
         )
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)}
+        )
+
+async def enhance_transcript_with_api(segments: List[TranscriptSegment], language: str) -> List[TranscriptSegment]:
+    """Enhance transcript using direct OpenAI API call"""
+    try:
+        logger.info(f"Starting enhancement of {len(segments)} segments")
+        
+        if not OPENAI_API_KEY:
+            logger.error("OpenAI API key not found in environment variables")
+            raise ValueError("OpenAI API key is required. Set it in your .env file.")
+            
+        # Join segments into one text (with indices for mapping back)
+        transcript_text = ""
+        for i, segment in enumerate(segments):
+            transcript_text += f"[{i}] {segment.text}\n"
+        
+        logger.info(f"Prepared transcript text ({len(transcript_text)} chars)")
+        
+        # Create the API request
+        api_url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+        
+        # Build the payload
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": f"You are an assistant that fixes transcript formatting in {language}."},
+                {"role": "user", "content": f"""
+                Below is a transcript from a YouTube video in {language} with line numbers in [brackets].
+                Fix the text by adding proper punctuation, capitalization, and fixing obvious grammar errors.
+                IMPORTANT: Keep the line numbers [0], [1], etc. at the beginning of each line.
+                DO NOT change the meaning or add/remove content.
+                
+                Transcript:
+                {transcript_text}
+                """}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }
+        
+        logger.info("Sending request to OpenAI")
+        
+        # Make the API call
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                response = await client.post(api_url, json=payload, headers=headers)
+                logger.info(f"OpenAI response status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text
+                    logger.error(f"OpenAI API error: {error_text}")
+                    raise ValueError(f"OpenAI API returned {response.status_code}: {error_text}")
+                    
+                # Parse the response
+                result = response.json()
+                enhanced_text = result["choices"][0]["message"]["content"].strip()
+                logger.info(f"Received enhanced text ({len(enhanced_text)} chars)")
+                
+                # Process the enhanced text, keeping line mappings
+                enhanced_segments = [TranscriptSegment(
+                    start_time=segment.start_time,
+                    duration=segment.duration,
+                    text=segment.text  # Default to original
+                ) for segment in segments]
+                
+                # Parse enhanced lines and update segments
+                for line in enhanced_text.split('\n'):
+                    # Extract index from [index] format
+                    match = re.search(r'\[(\d+)\](.*)', line)
+                    if match:
+                        idx = int(match.group(1))
+                        text = match.group(2).strip()
+                        if 0 <= idx < len(enhanced_segments):
+                            enhanced_segments[idx].text = text
+                
+                logger.info(f"Successfully enhanced {len(enhanced_segments)} segments")
+                return enhanced_segments
+                
+            except httpx.RequestError as e:
+                logger.error(f"HTTP request error: {str(e)}")
+                raise ValueError(f"Error connecting to OpenAI: {str(e)}")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {str(e)}")
+                raise ValueError(f"Invalid response from OpenAI: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Error in enhance_transcript_with_api: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise  # Re-raise to be caught by the endpoint
+
+def enhance_transcript_locally(segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
+    """Enhance transcript using local rules."""
+    try:
+        logger.info(f"Enhancing {len(segments)} segments locally")
+        enhanced_segments = []
+        
+        for segment in segments:
+            text = segment.text
+            
+            # Basic text cleaning and enhancement rules
+            # 1. Capitalize first letter of sentences
+            if text and len(text) > 0:
+                text = text[0].upper() + text[1:]
+            
+            # 2. Add period at the end if missing
+            if text and not text.endswith(('.', '!', '?')):
+                text += '.'
+            
+            # 3. Fix common spacing issues
+            text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with single space
+            text = re.sub(r'\s([.,!?])', r'\1', text)  # Remove space before punctuation
+            
+            # 4. Fix capitalization after periods
+            def capitalize_after_period(match):
+                return match.group(1) + match.group(2).upper()
+            
+            text = re.sub(r'([.!?])\s+([a-z])', capitalize_after_period, text)
+            
+            # Create a new segment with enhanced text
+            enhanced_segments.append(TranscriptSegment(
+                start_time=segment.start_time,
+                duration=segment.duration,
+                text=text
+            ))
+        
+        logger.info(f"Enhanced {len(enhanced_segments)} segments locally")
+        return enhanced_segments
+        
+    except Exception as e:
+        logger.error(f"Error in local enhancement: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise ValueError(f"Failed to enhance transcript locally: {str(e)}")
+
+@app.post("/enhance-transcript")
+async def enhance_transcript(request: TranscriptEnhanceRequest):
+    """Enhance transcript with local rules"""
+    try:
+        logger.info(f"Received request to enhance {len(request.segments)} segments in {request.language}")
+        
+        if not request.segments:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "No transcript segments provided"}
+            )
+            
+        # Use local enhancement
+        enhanced_segments = enhance_transcript_locally(request.segments)
+        
+        # Convert to the format expected by the frontend
+        events = []
+        for segment in enhanced_segments:
+            events.append({
+                "tStartMs": segment.start_time,
+                "dDurationMs": segment.duration,
+                "segs": [{"utf8": segment.text}]
+            })
+            
+        logger.info(f"Returning {len(events)} enhanced events")
+        return {"events": events}
+        
+    except ValueError as e:
+        logger.error(f"Value error in enhance_transcript: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(e)}
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in enhance_transcript: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)}
+        )
+
+@app.get("/simple-enhance")
+async def simple_enhance(transcript: str = ""):
+    """Enhance transcript text and return the enhanced version."""
+    try:
+        # Decode the transcript if provided
+        import urllib.parse
+        transcript_text = urllib.parse.unquote(transcript) if transcript else ""
+        
+        # Split into lines and enhance each line
+        lines = transcript_text.split('\n')
+        enhanced_lines = []
+        
+        for line in lines:
+            if line.strip():
+                # Capitalize first letter
+                enhanced_line = line[0].upper() + line[1:] if line else ""
+                # Add period if missing
+                if not enhanced_line.endswith(('.', '!', '?')):
+                    enhanced_line += '.'
+                enhanced_lines.append(enhanced_line)
+        
+        # Join the enhanced lines
+        enhanced_text = '\n'.join(enhanced_lines)
+        
+        # Return plain text response
+        return Response(content=enhanced_text, media_type="text/plain")
+        
+    except Exception as e:
+        logger.error(f"Error in simple_enhance: {str(e)}")
         logger.error(traceback.format_exc())
         return JSONResponse(
             status_code=500,

@@ -118,6 +118,55 @@
         .transcript-text {
             color: #0f0f0f;
         }
+
+        #enhancedTranscriptPanel {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 20px;
+            background: white;
+        }
+        
+        /* Add a different color to enhanced transcript */
+        #enhancedTranscriptContent .transcript-text {
+            color: #006400; /* Dark green */
+        }
+
+        #enhancedComparisonPanel {
+            max-height: 600px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 20px;
+            background: white;
+        }
+        
+        .transcript-comparison-container {
+            display: flex;
+            flex-direction: row;
+            gap: 20px;
+        }
+        
+        .transcript-column {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .transcript-column h4 {
+            margin-top: 0;
+            padding: 5px;
+            background-color: #f0f0f0;
+            text-align: center;
+        }
+        
+        #originalTranscriptContent .transcript-text {
+            color: #333;
+        }
+        
+        #enhancedTranscriptContent .transcript-text {
+            color: #006400; /* Dark green */
+        }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -150,6 +199,7 @@
                             disabled>
                         Show Transcript
                     </button>
+                    
                 </div>
             </div>
 
@@ -157,6 +207,27 @@
                 <h3>Transcript</h3>
                 <div id="transcriptContent"></div>
             </div>
+
+            <div id="enhancedTranscriptPanel" class="hidden">
+                <h3>Enhanced Transcript</h3>
+                <div id="enhancedTranscriptContent"></div>
+            </div>
+
+            <div id="enhancedComparisonPanel" class="hidden" style="margin: 20px 0; padding: 15px; border: 2px solid #4CAF50; background: #f5f5f5;">
+                <h3>Transcript Comparison</h3>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1;">
+                        <h4>Original Transcript</h4>
+                        <div id="originalTranscriptContent"></div>
+                    </div>
+                    <div style="flex: 1;">
+                        <h4>Enhanced Transcript</h4>
+                        <div id="enhancedTranscriptContentComparison"></div>
+                    </div>
+                </div>
+            </div>
+
+            <button id="enhanceTranscriptBtn" style="margin-top: 10px; padding: 8px 16px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Enhance Transcript</button>
         </div>
     </div>
 
@@ -170,6 +241,7 @@
         let player;
         let currentVideoId = null;
         let captionsEnabled = false;
+        let captionData = null;
 
         // Initialize YouTube Player
         function onYouTubeIframeAPIReady() {
@@ -325,6 +397,11 @@
                     console.error('No transcript events found in the data');
                     alert('No transcript content available');
                 }
+
+                window.captionData = data;
+                const enhanceTranscriptBtn = document.getElementById('enhanceTranscriptBtn');
+                enhanceTranscriptBtn.disabled = false;
+
             } catch (error) {
                 console.error('Error:', error);
                 alert('Failed to load transcript: ' + error.message);
@@ -377,6 +454,114 @@
             tag.src = 'https://www.youtube.com/iframe_api';
             const firstScriptTag = document.getElementsByTagName('script')[0];
             firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+        }
+
+        // Add this to your DOMContentLoaded event listener
+        const enhanceTranscriptBtn = document.getElementById('enhanceTranscriptBtn');
+        if (enhanceTranscriptBtn) {
+            enhanceTranscriptBtn.addEventListener('click', async function() {
+                if (!window.captionData || !window.captionData.events) {
+                    alert('Please load a transcript first');
+                    return;
+                }
+                
+                // Extract text from caption data
+                const transcriptLines = window.captionData.events.map(event => {
+                    return event.segs[0].utf8;
+                });
+                
+                // Join lines with newlines
+                const transcriptText = transcriptLines.join('\n');
+                console.log('Original transcript text:', transcriptText);
+                
+                // Encode for URL
+                const encodedText = encodeURIComponent(transcriptText);
+                console.log('Encoded transcript text:', encodedText);
+                
+                try {
+                    // First, populate the original transcript content
+                    const originalContent = document.getElementById('originalTranscriptContent');
+                    if (originalContent) {
+                        originalContent.innerHTML = ''; // Clear existing content
+                        
+                        window.captionData.events.forEach((event) => {
+                            const line = document.createElement('div');
+                            line.className = 'transcript-line';
+                            
+                            const timestamp = document.createElement('span');
+                            timestamp.className = 'transcript-timestamp';
+                            timestamp.textContent = formatTime(event.tStartMs);
+                            
+                            const text = document.createElement('span');
+                            text.className = 'transcript-text';
+                            text.textContent = event.segs[0].utf8;
+                            
+                            line.appendChild(timestamp);
+                            line.appendChild(text);
+                            
+                            // Add click handler to seek to timestamp
+                            line.addEventListener('click', () => {
+                                if (player && player.seekTo) {
+                                    player.seekTo(event.tStartMs / 1000, true);
+                                }
+                            });
+                            
+                            originalContent.appendChild(line);
+                        });
+                    }
+                    
+                    console.log('Fetching enhanced transcript...');
+                    const response = await fetch('/simple-enhance?transcript=' + encodedText);
+                    console.log('Response status:', response.status);
+            
+                    if (!response.ok) {
+                        throw new Error('Failed to enhance transcript');
+                    }
+            
+                    // Get the enhanced text
+                    const enhancedText = await response.text();
+                    console.log('Enhanced text received:', enhancedText);
+            
+                    // Split the enhanced text into lines
+                    const enhancedLines = enhancedText.split('\n');
+                    
+                    // Clear existing content
+                    const enhancedTranscriptContent = document.getElementById('enhancedTranscriptContentComparison');
+                    if (!enhancedTranscriptContent) {
+                        console.error('Enhanced content container not found!');
+                        return;
+                    }
+                    enhancedTranscriptContent.innerHTML = '';
+                    
+                    // Add each enhanced line
+                    enhancedLines.forEach(line => {
+                        if (line.trim()) {
+                            const lineElement = document.createElement('div');
+                            lineElement.className = 'transcript-line';
+                            lineElement.textContent = line;
+                            enhancedTranscriptContent.appendChild(lineElement);
+                        }
+                    });
+            
+                    // Show the comparison panel
+                    const panel = document.getElementById('enhancedComparisonPanel');
+                    if (panel) {
+                        panel.classList.remove('hidden');
+                        panel.style.display = 'block'; // Ensure it's visible
+                        console.log('Comparison panel should be visible now');
+                    }
+            
+                    // Hide the original transcript panel
+                    const transcriptPanel = document.getElementById('transcriptPanel');
+                    if (transcriptPanel) {
+                        transcriptPanel.classList.add('hidden');
+                    }
+            
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('Failed to enhance transcript: ' + error.message);
+                }
+            });
         }
     </script>
 </body>

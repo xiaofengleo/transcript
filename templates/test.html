@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Transcript Test Page</title>
+    <style>
+        .test-box {
+            margin: 20px;
+            padding: 20px;
+            border: 5px solid red;
+            background-color: yellow;
+        }
+        .output-area {
+            margin-top: 10px;
+            padding: 10px;
+            border: 2px solid blue;
+            min-height: 50px;
+            background-color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="test-box">
+        <h1>Basic DOM Test Page</h1>
+        <button id="testButton" onclick="runBasicTest()">RUN BASIC TEST</button>
+        <div id="outputArea" class="output-area">(Waiting for test to run)</div>
+    </div>
+
+    <script>
+        // Most basic DOM manipulation test
+        function runBasicTest() {
+            alert('Basic test function called');
+            
+            // 1. Find the output element
+            const output = document.getElementById('outputArea');
+            
+            // 2. Change its content
+            if (output) {
+                output.innerHTML = '<span style="color:green">TEST SUCCESSFUL: ' + new Date().toString() + '</span>';
+            } else {
+                alert('ERROR: Could not find outputArea element');
+            }
+        }
+        
+        // Run test automatically on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM ready');
+            const output = document.getElementById('outputArea');
+            if (output) {
+                output.innerHTML += '<div>DOMContentLoaded event fired</div>';
+            }
+        });
+        
+        // Add a message after window load
+        window.onload = function() {
+            console.log('Window loaded');
+            const output = document.getElementById('outputArea');
+            if (output) {
+                output.innerHTML += '<div>Window load event completed</div>';
+            }
+            
+            // Also add another button programmatically
+            const btn = document.createElement('button');
+            btn.textContent = 'Dynamic Button';
+            btn.style.marginTop = '10px';
+            btn.style.padding = '5px';
+            btn.style.backgroundColor = 'green';
+            btn.style.color = 'white';
+            btn.onclick = function() {
+                alert('Dynamic button clicked');
+                const output = document.getElementById('outputArea');
+                if (output) {
+                    output.innerHTML = '<span style="color:purple">DYNAMIC BUTTON TEST SUCCESSFUL</span>';
+                }
+            };
+            
+            // Add button to the page
+            document.body.appendChild(btn);
+        };
+    </script>
+</body>
+</html>

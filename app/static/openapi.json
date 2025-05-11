@@ -1,0 +1,169 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "YouTube Transcript Helper API",
+    "description": "API for retrieving and enhancing YouTube video transcripts",
+    "version": "v1"
+  },
+  "servers": [
+    {
+      "url": "https://your-app-url.com"
+    }
+  ],
+  "paths": {
+    "/process": {
+      "post": {
+        "operationId": "getTranscript",
+        "summary": "Get a transcript for a YouTube video",
+        "description": "Retrieves the transcript/captions for a given YouTube video URL",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "video_url": {
+                    "type": "string",
+                    "description": "YouTube video URL"
+                  }
+                },
+                "required": ["video_url"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transcript data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tStartMs": {
+                            "type": "integer"
+                          },
+                          "dDurationMs": {
+                            "type": "integer"
+                          },
+                          "segs": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "utf8": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Transcript not found"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    },
+    "/enhance-transcript": {
+      "post": {
+        "operationId": "enhanceTranscript",
+        "summary": "Enhance a transcript with AI",
+        "description": "Uses AI to improve the transcript with proper punctuation and grammar",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "segments": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "start_time": {
+                          "type": "integer"
+                        },
+                        "duration": {
+                          "type": "integer"
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "language": {
+                    "type": "string"
+                  }
+                },
+                "required": ["segments"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enhanced transcript data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tStartMs": {
+                            "type": "integer"
+                          },
+                          "dDurationMs": {
+                            "type": "integer"
+                          },
+                          "segs": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "utf8": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Server error"
+          }
+        }
+      }
+    }
+  }
+}
