@@ -20,15 +20,13 @@ from urllib.parse import parse_qs, urlparse
 import subprocess
 import sys
 import aiohttp
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # Load environment variables
 load_dotenv()
 
-# Set up detailed logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Get YouTube API key
@@ -78,151 +76,118 @@ class TranscriptEnhanceRequest(BaseModel):
     language: str = "dutch"  # default to Dutch since your video has Dutch captions
 
 def extract_video_id(url: str) -> str:
-    """Extract video ID from YouTube URL."""
-    logger.info(f"Extracting video ID from URL: {url}")
-    
-    # Multiple patterns to match different YouTube URL formats
+    """Extract video ID from various YouTube URL formats."""
     patterns = [
-        r'youtube\.com\/watch\?v=([-\w]+)',           # Standard watch URL
-        r'youtu\.be\/([-\w]+)',                       # Shortened URL
-        r'youtube\.com\/embed\/([-\w]+)',             # Embed URL
-        r'v=([-\w]+)(?:&|$)'                          # v= parameter
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',  # Regular watch URLs
+        r'youtu\.be\/([0-9A-Za-z_-]{11})',   # Short URLs
+        r'youtube\.com\/embed\/([0-9A-Za-z_-]{11})',  # Embed URLs
+        r'youtube\.com\/shorts\/([0-9A-Za-z_-]{11})',  # Shorts URLs
+        r'youtube\.com\/v\/([0-9A-Za-z_-]{11})'  # Video URLs
     ]
     
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
-            video_id = match.group(1)
-            logger.info(f"Extracted video ID: {video_id}")
-            return video_id
-            
-    logger.error(f"Could not extract video ID from URL: {url}")
-    raise ValueError(f"Invalid YouTube URL: {url}")
+            return match.group(1)
+    return None
 
 async def extract_captions_from_html(video_id: str) -> Optional[Dict]:
     try:
-        # Log the video ID
         logger.info(f"Extracting captions for video ID: {video_id}")
         
-        # Fetch the YouTube page
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        logger.info(f"Fetching URL: {url}")
+        # Use youtube-transcript-api instead of direct HTML parsing
+        from youtube_transcript_api import YouTubeTranscriptApi
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript = transcript_list.find_transcript(['nl'])  # Try Dutch first
+        except:
+            # If Dutch not available, get the first available transcript
+            transcript = transcript_list.find_transcript(['en'])
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status != 200:
-                    logger.error(f"Failed to fetch YouTube page. Status: {response.status}")
-                    return None
-                
-                html = await response.text()
-                logger.info("Successfully fetched YouTube page")
-                
-                # Log the first 500 characters of HTML to check content
-                logger.info(f"HTML preview: {html[:500]}")
-                
-                # Find the ytInitialPlayerResponse
-                match = re.search(r'var\s+ytInitialPlayerResponse\s*=\s*({.+?});', html)
-                if not match:
-                    logger.error("Could not find ytInitialPlayerResponse in HTML")
-                    return None
-                
-                try:
-                    player_response = json.loads(match.group(1))
-                    logger.info("Successfully parsed player response")
-                    
-                    # Log the structure of player_response
-                    logger.info(f"Player response keys: {player_response.keys()}")
-                    
-                    # Check for captions
-                    if 'captions' not in player_response:
-                        logger.error("No captions key in player response")
-                        return None
-                        
-                    captions = player_response['captions']
-                    logger.info(f"Captions data: {captions}")
-                    
-                    if 'playerCaptionsTracklistRenderer' in captions:
-                        tracks = captions['playerCaptionsTracklistRenderer'].get('captionTracks', [])
-                        logger.info(f"Found {len(tracks)} caption tracks")
-                        
-                        if tracks:
-                            # Find Dutch caption track
-                            dutch_track = None
-                            for track in tracks:
-                                lang = track.get('languageCode', '')
-                                logger.info(f"Found track with language: {lang}")
-                                if lang == 'nl' or lang.startswith('nl-'):
-                                    dutch_track = track
-                                    logger.info(f"Selected Dutch track: {json.dumps(dutch_track)[:200]}...")
-                                    break
-                            
-                            if not dutch_track:
-                                # If no Dutch track, take the first one
-                                dutch_track = tracks[0]
-                                logger.info(f"No Dutch track found, using first track: {json.dumps(dutch_track)[:200]}...")
-                            
-                            # Get the caption content URL
-                            base_url = dutch_track.get('baseUrl')
-                            if base_url:
-                                logger.info(f"Found caption URL: {base_url}")
-                                
-                                # Fetch the actual captions
-                                async with httpx.AsyncClient() as client:
-                                    caption_response = await client.get(base_url)
-                                    logger.info(f"Caption response status: {caption_response.status_code}")
-                                    
-                                    if caption_response.status_code == 200:
-                                        caption_content = caption_response.text
-                                        logger.info(f"Caption content preview: {caption_content[:200]}...")
-                                        
-                                        # Parse the XML content
-                                        try:
-                                            root = ET.fromstring(caption_content)
-                                            events = []
-                                            
-                                            for text in root.findall('.//text'):
-                                                start = float(text.get('start', 0))
-                                                dur = float(text.get('dur', 0))
-                                                content = text.text or ""
-                                                
-                                                if content:
-                                                    content = (content.replace('&#39;', "'")
-                                                                    .replace('&quot;', '"')
-                                                                    .replace('\n', ' ')
-                                                                    .replace('&amp;', '&')
-                                                                    .strip())
-                                                    
-                                                    events.append({
-                                                        "tStartMs": int(start * 1000),
-                                                        "dDurationMs": int(dur * 1000),
-                                                        "segs": [{"utf8": content}]
-                                                    })
-                                            
-                                            if events:
-                                                logger.info(f"Successfully parsed {len(events)} caption events")
-                                                return {"events": events}
-                                            else:
-                                                logger.warning("No caption events found in XML")
-                                        except ET.ParseError as e:
-                                            logger.error(f"Failed to parse caption XML: {str(e)}")
-                                    else:
-                                        logger.error(f"Failed to fetch captions from URL: {base_url}")
-                            else:
-                                logger.error("No baseUrl found in caption track")
-                        else:
-                            logger.error("No caption tracks found")
-                    else:
-                        logger.error("No captions data found in player response")
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse player response: {str(e)}")
-                    return None
-                    
+        transcript_data = transcript.fetch()
+        
+        # Convert to our format
+        events = []
+        for item in transcript_data:
+            events.append({
+                'start': item['start'],
+                'text': item['text']
+            })
+        
+        return {'events': events}
+        
     except Exception as e:
         logger.error(f"Error extracting captions: {str(e)}")
+        return None
+
+async def get_captions_from_api(video_id: str) -> Optional[Dict]:
+    try:
+        api_key = os.getenv('YOUTUBE_API_KEY')
+        if not api_key:
+            logger.error("YouTube API key not found in environment variables!")
+            return None
+            
+        # First, get the caption track ID
+        url = f"https://www.googleapis.com/youtube/v3/captions?videoId={video_id}&part=snippet&key={api_key}"
+        logger.info(f"Fetching caption tracks from: {url}")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Failed to fetch captions from API. Status: {response.status}, Error: {error_text}")
+                    return None
+                    
+                data = await response.json()
+                logger.info(f"Received caption tracks data: {data}")
+                
+                if not data.get('items'):
+                    logger.error("No caption tracks found")
+                    return None
+                
+                # Get the first caption track
+                caption_track = data['items'][0]
+                caption_id = caption_track['id']
+                logger.info(f"Found caption track ID: {caption_id}")
+                
+                # Now get the actual transcript
+                transcript_url = f"https://www.googleapis.com/youtube/v3/captions/{caption_id}?key={api_key}"
+                logger.info(f"Fetching transcript from: {transcript_url}")
+                
+                async with session.get(transcript_url) as transcript_response:
+                    if transcript_response.status != 200:
+                        error_text = await transcript_response.text()
+                        logger.error(f"Failed to fetch transcript. Status: {transcript_response.status}, Error: {error_text}")
+                        return None
+                    
+                    transcript_data = await transcript_response.text()
+                    logger.info(f"Received transcript data: {transcript_data[:200]}...")  # Log first 200 chars
+                    
+                    # Parse the transcript data
+                    events = []
+                    for line in transcript_data.split('\n'):
+                        if line.strip():
+                            try:
+                                # Parse timestamp and text
+                                timestamp, text = line.split(' ', 1)
+                                start_time = float(timestamp)
+                                events.append({
+                                    'start': start_time,
+                                    'text': text.strip()
+                                })
+                            except ValueError as e:
+                                logger.error(f"Error parsing line '{line}': {str(e)}")
+                                continue
+                    
+                    logger.info(f"Parsed {len(events)} events from transcript")
+                    return {
+                        'events': events
+                    }
+                
+    except Exception as e:
+        logger.error(f"Error fetching captions from API: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 @app.get("/", response_class=HTMLResponse)
@@ -234,7 +199,7 @@ async def process_video(video_data: VideoURL):
     try:
         logger.info(f"Processing video URL: {video_data.video_url}")
         
-        # Extract video ID
+        # Extract video ID from URL
         video_id = extract_video_id(video_data.video_url)
         if not video_id:
             logger.error("Invalid YouTube URL")
@@ -242,18 +207,35 @@ async def process_video(video_data: VideoURL):
             
         logger.info(f"Extracted video ID: {video_id}")
         
-        # Get captions
-        captions = await extract_captions_from_html(video_id)
-        if not captions:
-            logger.error("No captions found")
+        try:
+            # Try to get Dutch transcript first
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            try:
+                transcript = transcript_list.find_transcript(['nl'])
+            except:
+                # If Dutch not available, get the first available transcript
+                transcript = transcript_list.find_transcript(['en'])
+            
+            transcript_data = transcript.fetch()
+            
+            # Convert to our format
+            events = []
+            for item in transcript_data:
+                events.append({
+                    'start': item['start'],
+                    'text': item['text']
+                })
+            
+            return {'events': events}
+            
+        except Exception as e:
+            logger.error(f"Error fetching transcript: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise HTTPException(status_code=404, detail="No captions found for this video")
             
-        logger.info("Successfully extracted captions")
-        
-        return captions
-        
     except Exception as e:
         logger.error(f"Error processing video: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 async def enhance_transcript_with_api(segments: List[TranscriptSegment], language: str) -> List[TranscriptSegment]:
@@ -433,40 +415,34 @@ async def enhance_transcript(request: TranscriptEnhanceRequest):
             content={"detail": str(e)}
         )
 
-@app.get("/simple-enhance")
-async def simple_enhance(transcript: str = ""):
-    """Enhance transcript text and return the enhanced version."""
+@app.post("/simple-enhance")
+async def enhance_transcript(transcript_data: dict):
     try:
-        # Decode the transcript if provided
-        import urllib.parse
-        transcript_text = urllib.parse.unquote(transcript) if transcript else ""
-        
+        transcript = transcript_data.get('transcript', '')
+        if not transcript:
+            raise HTTPException(status_code=400, detail="No transcript provided")
+
         # Split into lines and enhance each line
-        lines = transcript_text.split('\n')
+        lines = transcript.split('\n')
         enhanced_lines = []
         
         for line in lines:
             if line.strip():
                 # Capitalize first letter
-                enhanced_line = line[0].upper() + line[1:] if line else ""
+                enhanced_line = line[0].upper() + line[1:]
                 # Add period if missing
                 if not enhanced_line.endswith(('.', '!', '?')):
                     enhanced_line += '.'
                 enhanced_lines.append(enhanced_line)
-        
-        # Join the enhanced lines
+
+        # Join lines back together
         enhanced_text = '\n'.join(enhanced_lines)
         
-        # Return plain text response
         return Response(content=enhanced_text, media_type="text/plain")
         
     except Exception as e:
-        logger.error(f"Error in simple_enhance: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"detail": str(e)}
-        )
+        logger.error(f"Error enhancing transcript: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Serve OpenAPI spec
 @app.get("/openapi.json")
