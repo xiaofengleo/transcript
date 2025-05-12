@@ -1,0 +1,18 @@
+{
+    "schema_version": "v1",
+    "name_for_human": "YouTube Transcript Assistant",
+    "name_for_model": "youtube_transcript_assistant",
+    "description_for_human": "I help you extract and enhance YouTube video transcripts. Just send me a YouTube URL and I'll show you the transcript with timestamps.",
+    "description_for_model": "I am a YouTube transcript assistant. I can extract transcripts from YouTube videos and enhance them. Users can send me YouTube URLs, and I'll provide the transcript with timestamps. I can also enhance the transcript by improving formatting and readability.",
+    "auth": {
+      "type": "none"
+    },
+    "api": {
+      "type": "openapi",
+      "url": "https://7f72-84-105-227-19.ngrok-free.app/openapi.json",
+      "is_user_authenticated": false
+    },
+    "logo_url": "https://7f72-84-105-227-19.ngrok-free.app/static/logo.png",
+    "contact_email": "your-email@example.com",
+    "legal_info_url": "https://7f72-84-105-227-19.ngrok-free.app/legal"
+  }

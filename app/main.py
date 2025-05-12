@@ -53,14 +53,15 @@ app = FastAPI(title="YouTube Transcript Processor")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, you might want to restrict this
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Mount static files and setup templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/.well-known", StaticFiles(directory=".well-known"), name="well-known")
 templates = Jinja2Templates(directory="templates")
 
 class VideoURL(BaseModel):
@@ -470,6 +471,76 @@ async def simple_enhance(transcript: str = ""):
             status_code=500,
             content={"detail": str(e)}
         )
+
+# Serve OpenAPI spec
+@app.get("/openapi.json")
+async def get_openapi_spec():
+    with open("app/static/openapi.json", "r") as f:
+        return JSONResponse(content=json.loads(f.read()))
+
+# Serve plugin manifest
+@app.get("/.well-known/ai-plugin.json")
+async def get_plugin_manifest():
+    with open(".well-known/ai-plugin.json", "r") as f:
+        return JSONResponse(content=json.loads(f.read()))
+
+@app.post("/chat")
+async def chat_endpoint(request: Request):
+    data = await request.json()
+    message = data.get("message", "")
+    # Extract YouTube URL from message, process, and return transcript/enhanced transcript
+    # Example logic:
+    video_url = extract_video_url_from_message(message)
+    if not video_url:
+        return {"response": "Please provide a valid YouTube URL."}
+    video_id = extract_video_id(video_url)
+    captions = await extract_captions_from_html(video_id)
+    if not captions or not captions.get("events"):
+        return {"response": "No captions found for this video."}
+    # Optionally enhance transcript here
+    return {
+        "response": "Here is the transcript:",
+        "transcript": captions
+    }
+
+def extract_video_url_from_message(message: str) -> Optional[str]:
+    """
+    Extract YouTube video URL from a user message.
+    Handles various YouTube URL formats and common message patterns.
+    
+    Args:
+        message (str): The user's message text
+        
+    Returns:
+        Optional[str]: The extracted YouTube URL if found, None otherwise
+    """
+    # Common YouTube URL patterns
+    youtube_patterns = [
+        r'(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})',
+        r'(https?://)?(www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+        r'(https?://)?(www\.)?youtube\.com/v/([a-zA-Z0-9_-]{11})'
+    ]
+    
+    # Combine all patterns
+    combined_pattern = '|'.join(f'({pattern})' for pattern in youtube_patterns)
+    
+    # Find all matches in the message
+    matches = re.finditer(combined_pattern, message)
+    
+    # Extract the first valid URL
+    for match in matches:
+        # Get the full match
+        url = match.group(0)
+        
+        # If URL doesn't start with http, add it
+        if not url.startswith('http'):
+            url = 'https://' + url
+            
+        # Validate the URL format
+        if any(pattern in url for pattern in ['youtube.com/watch?v=', 'youtu.be/', 'youtube.com/embed/', 'youtube.com/shorts/', 'youtube.com/v/']):
+            return url
+    
+    return None
 
 if __name__ == "__main__":
     import uvicorn
