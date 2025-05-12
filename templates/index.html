@@ -312,34 +312,25 @@
         });
 
         // Show transcript handler
-        document.getElementById('showTranscriptBtn').addEventListener('click', async function() {
-            console.log('Show transcript clicked');
-            if (!currentVideoId) {
-                console.error('No video loaded');
-                return;
-            }
-            
+        document.getElementById('showTranscriptBtn').addEventListener('click', async () => {
+            const videoUrl = document.getElementById('videoUrl').value;
             try {
-                console.log('Fetching transcript for video:', currentVideoId);
-                const videoUrl = `https://www.youtube.com/watch?v=${currentVideoId}`;
-                console.log('Sending request with URL:', videoUrl);
-                
                 const response = await fetch('/process', {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Content-Type': 'application/json',
                     },
-                    body: `video_url=${encodeURIComponent(videoUrl)}`
+                    body: JSON.stringify({ video_url: videoUrl })
                 });
                 
                 console.log('Response status:', response.status);
-
+                
                 if (!response.ok) {
-                    const errorText = await response.text();
-                    console.error('Error response:', errorText);
-                    throw new Error(errorText);
+                    const errorData = await response.json();
+                    console.error('Error response:', errorData);
+                    throw new Error(JSON.stringify(errorData));
                 }
-
+                
                 const data = await response.json();
                 console.log('Received transcript data:', data);
                 

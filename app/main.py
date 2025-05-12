@@ -19,6 +19,7 @@ import html
 from urllib.parse import parse_qs, urlparse
 import subprocess
 import sys
+import aiohttp
 
 # Load environment variables
 load_dotenv()
@@ -98,47 +99,54 @@ def extract_video_id(url: str) -> str:
     logger.error(f"Could not extract video ID from URL: {url}")
     raise ValueError(f"Invalid YouTube URL: {url}")
 
-async def extract_captions_from_html(video_id: str) -> Optional[Dict[str, Any]]:
-    """Extract captions directly from YouTube page HTML."""
+async def extract_captions_from_html(video_id: str) -> Optional[Dict]:
     try:
+        # Log the video ID
+        logger.info(f"Extracting captions for video ID: {video_id}")
+        
+        # Fetch the YouTube page
         url = f"https://www.youtube.com/watch?v={video_id}"
+        logger.info(f"Fetching URL: {url}")
+        
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        logger.info(f"Fetching YouTube page: {url}")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers)
-            
-            if response.status_code != 200:
-                logger.error(f"Failed to fetch YouTube page, status code: {response.status_code}")
-                return None
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    logger.error(f"Failed to fetch YouTube page. Status: {response.status}")
+                    return None
                 
-            html_content = response.text
-            logger.info(f"Successfully fetched YouTube page ({len(html_content)} bytes)")
-            
-            # Look for caption data in the HTML
-            # Pattern to find ytInitialPlayerResponse
-            pattern = r'ytInitialPlayerResponse\s*=\s*({.+?});'
-            match = re.search(pattern, html_content)
-            
-            if not match:
-                logger.error("Could not find ytInitialPlayerResponse in the HTML")
-                return None
+                html = await response.text()
+                logger.info("Successfully fetched YouTube page")
                 
-            player_response_str = match.group(1)
-            
-            try:
-                player_response = json.loads(player_response_str)
-                logger.info("Successfully parsed player response JSON")
+                # Log the first 500 characters of HTML to check content
+                logger.info(f"HTML preview: {html[:500]}")
                 
-                # Extract captions data
-                if 'captions' in player_response:
-                    captions_data = player_response['captions']
-                    logger.info(f"Found captions data: {json.dumps(captions_data)[:200]}...")
+                # Find the ytInitialPlayerResponse
+                match = re.search(r'var\s+ytInitialPlayerResponse\s*=\s*({.+?});', html)
+                if not match:
+                    logger.error("Could not find ytInitialPlayerResponse in HTML")
+                    return None
+                
+                try:
+                    player_response = json.loads(match.group(1))
+                    logger.info("Successfully parsed player response")
                     
-                    if 'playerCaptionsTracklistRenderer' in captions_data:
-                        tracks = captions_data['playerCaptionsTracklistRenderer'].get('captionTracks', [])
+                    # Log the structure of player_response
+                    logger.info(f"Player response keys: {player_response.keys()}")
+                    
+                    # Check for captions
+                    if 'captions' not in player_response:
+                        logger.error("No captions key in player response")
+                        return None
+                        
+                    captions = player_response['captions']
+                    logger.info(f"Captions data: {captions}")
+                    
+                    if 'playerCaptionsTracklistRenderer' in captions:
+                        tracks = captions['playerCaptionsTracklistRenderer'].get('captionTracks', [])
                         logger.info(f"Found {len(tracks)} caption tracks")
                         
                         if tracks:
@@ -208,16 +216,13 @@ async def extract_captions_from_html(video_id: str) -> Optional[Dict[str, Any]]:
                         else:
                             logger.error("No caption tracks found")
                     else:
-                        logger.error("No playerCaptionsTracklistRenderer found")
-                else:
-                    logger.error("No captions data found in player response")
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse player response JSON: {str(e)}")
-                
-        return None
+                        logger.error("No captions data found in player response")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse player response: {str(e)}")
+                    return None
+                    
     except Exception as e:
-        logger.error(f"Error extracting captions from HTML: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error extracting captions: {str(e)}")
         return None
 
 @app.get("/", response_class=HTMLResponse)
@@ -225,40 +230,31 @@ async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 @app.post("/process")
-async def process_video(video_url: str = Form(...)):
-    """Process video URL and return captions."""
+async def process_video(video_data: VideoURL):
     try:
-        logger.info(f"Processing video URL: {video_url}")
+        logger.info(f"Processing video URL: {video_data.video_url}")
         
-        video_id = extract_video_id(video_url)
+        # Extract video ID
+        video_id = extract_video_id(video_data.video_url)
+        if not video_id:
+            logger.error("Invalid YouTube URL")
+            raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+            
         logger.info(f"Extracted video ID: {video_id}")
         
-        # Extract captions directly from the YouTube page
+        # Get captions
         captions = await extract_captions_from_html(video_id)
+        if not captions:
+            logger.error("No captions found")
+            raise HTTPException(status_code=404, detail="No captions found for this video")
+            
+        logger.info("Successfully extracted captions")
         
-        if captions and captions.get("events"):
-            logger.info(f"Successfully extracted captions with {len(captions['events'])} events")
-            return captions
-        else:
-            logger.error("Failed to extract captions")
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "No captions found for this video"}
-            )
+        return captions
         
-    except ValueError as e:
-        logger.error(f"Value error: {str(e)}")
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(e)}
-        )
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=500,
-            content={"detail": str(e)}
-        )
+        logger.error(f"Error processing video: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 async def enhance_transcript_with_api(segments: List[TranscriptSegment], language: str) -> List[TranscriptSegment]:
     """Enhance transcript using direct OpenAI API call"""
